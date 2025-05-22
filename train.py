@@ -8,14 +8,14 @@ import data as d
 import os
 from copy import deepcopy
 import matplotlib.pyplot as plt
-import datetime
+from datetime import datetime
 
 # 参数
 BATCH_SIZE = 64
-MU = 0.5
+MU = 7
 CONFIDENCE_THRESHOLD = 0.95
 LAMBDA_U = 1.0
-EPOCHS = 10
+EPOCHS = 500
 LR = 0.03
 WEIGHT_DECAY = 5e-4
 MOMENTUM = 0.9
@@ -39,10 +39,12 @@ def evaluate(model, test_loader, device):
     return acc
 
 # train
-def train_fixmatch(model, labeled_loader, unlabeled_loader, optimizer, device, epochs=50, tau=0.95, lambda_u=1.0, ckpt_root="./checkpoints", log_path="./logs"):
+def train_fixmatch(model, model_name, labeled_loader, unlabeled_loader, optimizer, device, epochs=50, tau=0.95, lambda_u=1.0, num_classes=10, ckpt_root="./checkpoints", log_root="./logs"):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    ckpt_path = os.path.join(ckpt_root, timestamp)
-    os.makedirs(ckpt_path, exist_ok=True)
+    # ckpt_path = os.path.join(ckpt_root, model_name, timestamp)
+    # os.makedirs(ckpt_path, exist_ok=True)
+    log_path = os.path.join(log_root, model_name)
+    os.makedirs(log_path, exist_ok=True)
     model.train()
     ce_loss = nn.CrossEntropyLoss()
     ema_model = deepcopy(model)
@@ -52,6 +54,7 @@ def train_fixmatch(model, labeled_loader, unlabeled_loader, optimizer, device, e
     initial_lr = optimizer.param_groups[0]['lr']
 
     step_log, eval_log, losses, labeled_losses, unlabeled_losses = [], [], [], [], []
+    final_acc = 0
 
     for epoch in range(epochs):
         total_loss = 0
@@ -65,6 +68,7 @@ def train_fixmatch(model, labeled_loader, unlabeled_loader, optimizer, device, e
                 param_group['lr'] = lr
             global_step += 1
 
+            # loss calculation
             logits_l = model(xl)
             loss_l = ce_loss(logits_l, yl)
 
@@ -78,6 +82,7 @@ def train_fixmatch(model, labeled_loader, unlabeled_loader, optimizer, device, e
 
             loss = loss_l + lambda_u * loss_u
 
+            # update model parameters
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -95,11 +100,16 @@ def train_fixmatch(model, labeled_loader, unlabeled_loader, optimizer, device, e
 
         acc = evaluate(ema_model, d.test_loader, device)
         eval_log.append((epoch + 1, acc))
+        final_acc = acc
 
         # Save checkpoint
-        ckpt_file = os.path.join(ckpt_path, f"model_epoch{epoch+1}.pt")
-        torch.save(ema_model.state_dict(), ckpt_file)
+        # ckpt_file = os.path.join(ckpt_path, f"model_epoch{epoch+1}.pt")
+        # torch.save(ema_model.state_dict(), ckpt_file)
     
+    # Save final accuracy to a file
+    with open(os.path.join(log_root, "acc.txt"), "w") as f:
+        f.write(f"{model_name}[{timestamp}]: {final_acc:.2f}\n")
+
     # 可视化
     steps, loss_list, loss_l_list, loss_u_list, lrs = zip(*step_log)
     epochs_, accs = zip(*eval_log)
@@ -128,21 +138,24 @@ def train_fixmatch(model, labeled_loader, unlabeled_loader, optimizer, device, e
 
     plt.tight_layout()
     plt.savefig(os.path.join(log_path, f"{timestamp}.png"))
-    plt.show()
 
 # 启动训练
 def run(model_name='cnn'):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     labeled_loader = DataLoader(d.labeled_dataset, batch_size=BATCH_SIZE, shuffle=True)
-    unlabeled_loader = DataLoader(d.unlabeled_dataset, batch_size=MU * BATCH_SIZE, shuffle=True)
+    unlabeled_loader = DataLoader(d.unlabeled_dataset, batch_size=int(MU * BATCH_SIZE), shuffle=True)
 
     model_dict = {
         'cnn': m.SimpleCNN,
         'mlp': m.MLP,
         'deepcnn': m.DeepCNN,
-        'resnet': m.ResNetLike,
-        'lenet': m.TinyLeNet
+        'lenet': m.TinyLeNet,
+        'resnet': m.ResNet18,
+        'mobilenet': m.MobileNetV2,
+        'efficientnet': m.EfficientNetB0,
+        'regnet': m.RegNetY8GF,
+        'shufflenet': m.ShuffleNetV2,
     }
 
     if model_name not in model_dict:
@@ -152,6 +165,6 @@ def run(model_name='cnn'):
 
     optimizer = torch.optim.SGD(model.parameters(), lr=LR, momentum=MOMENTUM, weight_decay=WEIGHT_DECAY, nesterov=True)
 
-    train_fixmatch(model, labeled_loader, unlabeled_loader, optimizer, device, EPOCHS, CONFIDENCE_THRESHOLD, LAMBDA_U)
+    train_fixmatch(model, model_name, labeled_loader, unlabeled_loader, optimizer, device, EPOCHS, CONFIDENCE_THRESHOLD, LAMBDA_U)
 
 run('cnn')
