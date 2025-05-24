@@ -9,6 +9,7 @@ import os
 from copy import deepcopy
 import matplotlib.pyplot as plt
 from datetime import datetime
+import time
 
 # 参数
 BATCH_SIZE = 64
@@ -19,11 +20,14 @@ EPOCHS = 100
 LR = 0.03
 WEIGHT_DECAY = 5e-4
 MOMENTUM = 0.9
+ALPHA_EMA = 0.999
+ALPHA_CBS = 0.7
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # evaluation
 def evaluate(model, test_loader, epoch, device):
+    start_time = time.time()
     model.eval()
     correct = 0
     total = 0
@@ -35,8 +39,9 @@ def evaluate(model, test_loader, epoch, device):
             total += y.size(0)
     acc = correct / total * 100
     print(f"[{epoch}] Test Accuracy: {acc:.2f}%")
+    eval_time = time.time() - start_time
     model.train()
-    return acc
+    return acc, eval_time
 
 # threshold update
 def threshold_cpl_M(x):
@@ -57,6 +62,12 @@ def threshold_linear(epoch, k=50, max_t=0.95, min_t=0.5):
 def threshold_smooth(epoch, k=50, max_t=0.95, min_t=0.5):
     thres = min_t + (1 - min_t) * (1 - np.exp(-(epoch - 1) / k))
     return min(max_t, thres)
+
+def batch_size_cbs(batch_size, step, total_steps, alpha=0.7):
+    term1 = 1 - step / total_steps
+    term2 = (1 - alpha) + alpha * term1
+    b_exp = batch_size * (1 - term1 / term2)
+    return b_exp
 
 # entropy mean loss
 def eml(max_probs, targets_u, logits_u_s, threshold):
@@ -91,19 +102,22 @@ def eml(max_probs, targets_u, logits_u_s, threshold):
     return loss_eml
 
 # train
-def train_fixmatch(model, model_name, labeled_loader, unlabeled_loader, test_loader, optimizer, device, epochs=50, tau=0.95, lambda_u=1.0, num_classes=10, ckpt_root="./checkpoints", log_root="./logs"):
+def train_fixmatch(model, model_name, labeled_loader, unlabeled_loader, test_loader, optimizer, device, epochs=50, tau=0.95, lambda_u=1.0, alpha_ema=0.999, alpha_cbs=0.7, num_classes=10, ckpt_root="./checkpoints", log_root="./logs"):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     # ckpt_path = os.path.join(ckpt_root, model_name, timestamp)
     # os.makedirs(ckpt_path, exist_ok=True)
     log_path = os.path.join(log_root, model_name)
     os.makedirs(log_path, exist_ok=True)
+    start_time = time.time()
+    eval_time = 0
+    final_acc = 0
     model.train()
     ce_loss = nn.CrossEntropyLoss()
-    alpha = 0.999
     ema_start = 100
+    total_steps = epochs * min(len(labeled_loader), len(unlabeled_loader))
     global_step = 0
     initial_lr = optimizer.param_groups[0]['lr']
-    threshold = torch.full((num_classes,), 0.5, device=device)
+    threshold = torch.zeros(num_classes, device=device)
 
     step_log, eval_log, losses, labeled_losses, unlabeled_losses = [], [], [], [], []
 
@@ -111,7 +125,10 @@ def train_fixmatch(model, model_name, labeled_loader, unlabeled_loader, test_loa
         total_loss = 0
         for (xl, yl), (xu_w, xu_s) in zip(labeled_loader, unlabeled_loader):
             xl, yl = xl.to(device), yl.to(device)
-            xu_w, xu_s = xu_w.to(device), xu_s.to(device)
+            # slice the batch with curriculum batch size
+            b_cbs = int(batch_size_cbs(xu_w.size(0), global_step, total_steps, alpha_cbs))
+            xu_w, xu_s = xu_w[:b_cbs].to(device), xu_s[:b_cbs].to(device)
+            # xu_w, xu_s = xu_w.to(device), xu_s.to(device)
 
             # loss calculation
             logits_l = model(xl)
@@ -126,7 +143,8 @@ def train_fixmatch(model, model_name, labeled_loader, unlabeled_loader, test_loa
             logits_u_s = model(xu_s)
             loss_u = (F.cross_entropy(logits_u_s, targets_u, reduction='none') * mask).mean()
 
-            # loss_em = eml(max_probs, targets_u, logits_u_s, tau)
+            # calculate entropy mean loss
+            loss_em = eml(max_probs, targets_u, logits_u_s, tau)
 
             loss = loss_l + lambda_u * loss_u
 
@@ -141,7 +159,7 @@ def train_fixmatch(model, model_name, labeled_loader, unlabeled_loader, test_loa
                     ema_model = deepcopy(model)
                 with torch.no_grad():
                     for ema_p, model_p in zip(ema_model.parameters(), model.parameters()):
-                        ema_p.data = alpha * ema_p.data + (1 - alpha) * model_p.data
+                        ema_p.data = alpha_ema * ema_p.data + (1 - alpha_ema) * model_p.data
 
             # update threshold
             with torch.no_grad():
@@ -159,16 +177,21 @@ def train_fixmatch(model, model_name, labeled_loader, unlabeled_loader, test_loa
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
 
-        acc = evaluate((model if epoch < ema_start else ema_model), test_loader, epoch, device)
+        acc, eval_time_unit = evaluate((model if epoch < ema_start else ema_model), test_loader, epoch, device)
         eval_log.append((epoch + 1, lr, acc))
+        final_acc = max(final_acc, acc)
+        eval_time += eval_time_unit
 
         # Save checkpoint
         # ckpt_file = os.path.join(ckpt_path, f"model_epoch{epoch+1}.pt")
         # torch.save(ema_model.state_dict(), ckpt_file)
     
+    # calculate training time
+    train_time = time.time() - start_time - eval_time
+
     # Save final accuracy to a file
     with open(os.path.join(log_root, "acc.txt"), "a") as f:
-        f.write(f"{model_name}[{timestamp}]: {acc:.2f}\n")
+        f.write(f"{model_name}[{timestamp}]: acc-{final_acc:.2f}, time-{train_time:.2f}\n")
 
     # 可视化
     steps, loss_list, loss_l_list, loss_u_list = zip(*step_log)
@@ -229,6 +252,6 @@ def run(model_name='cnn'):
 
     optimizer = torch.optim.SGD(model.parameters(), lr=LR, momentum=MOMENTUM, weight_decay=WEIGHT_DECAY, nesterov=True)
 
-    train_fixmatch(model, model_name, labeled_loader, unlabeled_loader, test_loader, optimizer, device, EPOCHS, CONFIDENCE_THRESHOLD, LAMBDA_U)
+    train_fixmatch(model, model_name, labeled_loader, unlabeled_loader, test_loader, optimizer, device, EPOCHS, CONFIDENCE_THRESHOLD, LAMBDA_U, ALPHA_EMA, ALPHA_CBS)
 
-run('resnet')
+run('regnet')
