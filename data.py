@@ -32,6 +32,20 @@ strong_transform = T.Compose([
 ])
 
 # 自定义 Dataset
+class LabeledDataset(Dataset):
+    def __init__(self, base_dataset, transform=None, aug=7):
+        self.dataset = ConcatDataset([base_dataset for _ in range(aug)])
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        img, label = self.dataset[idx]
+        if self.transform:
+            img = self.transform(img)
+        return img, label
+
 class UnlabeledDataset(Dataset):
     def __init__(self, base_dataset, transform_weak=None, transform_strong=None):
         self.dataset = base_dataset
@@ -55,12 +69,12 @@ def get_train_dataset():
             label_indices.extend(chosen)
         return label_indices
     
-    mnist_weak = MNIST(root="./data", train=True, download=True, transform=weak_transform)
-
-    labeled_idx = get_label_indices(mnist_weak, NUM_LABELED)
-    labeled_dataset = Subset(mnist_weak, labeled_idx)
-
     mnist_full = MNIST(root="./data", train=True, download=True, transform=None)
+
+    labeled_idx = get_label_indices(mnist_full, NUM_LABELED)
+    labeled_dataset = Subset(mnist_full, labeled_idx)
+    labeled_dataset = LabeledDataset(labeled_dataset, transform=weak_transform)
+
     emnist_letters = EMNIST(root="./data", split="letters", train=True, download=True, transform=None)
 
     unlabeled_mnist = Subset(mnist_full, list(set(range(len(mnist_full))) - set(labeled_idx)))
