@@ -47,7 +47,7 @@ def evaluate(model, test_loader, epoch, device):
 def threshold_cpl_M(x):
     return x / (2 - x)
 
-def threshold_cpl(max_probs, targets_u, tau, batch_size, min_thres=0.5, fn_M=threshold_cpl_M, num_classes=10, device=device):
+def threshold_cpl(max_probs, targets_u, tau, batch_size, min_thres=0, fn_M=threshold_cpl_M, num_classes=10, device=device):
     sigma = torch.zeros(num_classes, device=device)
     for c in range(num_classes):
         mask_c = targets_u.eq(c) & max_probs.ge(tau)
@@ -85,20 +85,20 @@ def eml(max_probs, targets_u, logits_u_s, threshold):
         non_target_mask = 1 - target_mask
         
         # Mask for samples below threshold but still valuable
-        valid_mask = max_probs.lt(threshold).float().unsqueeze(1) * non_target_mask
+        valid_mask = max_probs.ge(threshold).float().unsqueeze(1)  # Add dimension to match entropy shape
         
         # Calculate soft multi-label for entropy minimization
         # Target probability is complementary to sum of non-target probabilities
         target_prob = softmax_pred.gather(1, targets_u.unsqueeze(1))
         non_target_prob = (1 - target_prob) / (num_classes - 1)
-        soft_target = target_mask * target_prob + non_target_mask * non_target_prob
+        soft_target = non_target_mask * non_target_prob
         
         # Apply entropy minimization only to valid samples
-        entropy = -(soft_target * torch.log(softmax_pred + 1e-10) + 
-                   (1 - soft_target) * torch.log(1 - softmax_pred + 1e-10))
-        
+        entropy = -non_target_mask * ((soft_target * torch.log(softmax_pred + 1e-10) + 
+                   (1 - soft_target) * torch.log(1 - softmax_pred + 1e-10)))
+
     # Calculate final loss
-    loss_eml = (entropy * valid_mask).sum() / (valid_mask.sum() + 1e-10)
+    loss_eml = (valid_mask * entropy).sum() / (valid_mask.sum() + 1e-10)
     return loss_eml
 
 # train
@@ -113,11 +113,11 @@ def train_fixmatch(model, model_name, labeled_loader, unlabeled_loader, test_loa
     final_acc = 0
     model.train()
     ce_loss = nn.CrossEntropyLoss()
-    ema_start = 100
+    ema_start = 80
     total_steps = epochs * min(len(labeled_loader), len(unlabeled_loader))
     global_step = 0
     initial_lr = optimizer.param_groups[0]['lr']
-    threshold = torch.zeros(num_classes, device=device)
+    threshold = torch.full((num_classes,), 0, device=device)
 
     step_log, eval_log, losses, labeled_losses, unlabeled_losses = [], [], [], [], []
 
@@ -146,7 +146,7 @@ def train_fixmatch(model, model_name, labeled_loader, unlabeled_loader, test_loa
             # calculate entropy mean loss
             loss_em = eml(max_probs, targets_u, logits_u_s, tau)
 
-            loss = loss_l + lambda_u * loss_u
+            loss = loss_l + lambda_u * loss_u + loss_em
 
             # update model parameters
             optimizer.zero_grad()
@@ -254,4 +254,4 @@ def run(model_name='cnn'):
 
     train_fixmatch(model, model_name, labeled_loader, unlabeled_loader, test_loader, optimizer, device, EPOCHS, CONFIDENCE_THRESHOLD, LAMBDA_U, ALPHA_EMA, ALPHA_CBS)
 
-run('regnet')
+run('resnet')
