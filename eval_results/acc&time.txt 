@@ -1,0 +1,22 @@
+# acc & time report
+
+## model comparison
+
+cnn: acc-97.13, time-378.28
+resnet: acc-97.43, time-722.13
+mlp: acc-91.79, time-299.86
+deepcnn: acc-97.28, time-363.30
+mobilenet: acc-95.96, time-638.09
+lenet: acc-95.53, time-342.38
+efficientnet: acc-91.27, time-753.84
+shufflenet: acc-96.05, time-332.68
+regnet: acc-96.63, time-1041.10
+
+## ablation
+
+resnet[no optimization]: acc-89.23, time-147.56
+resnet[flip disabled]: acc-93.99, time-140.32
+resnet[flip disabled and labeled data replicated]: acc-98.63, time-829.89
+resnet[flip disabled, labeled data replicated and cpl]: acc-98.75, time-833.93
+resnet[flip disabled, labeled data replicated, cpl and eml]: acc-98.80, time-1298.88
+resnet[flip disabled, labeled data replicated, cpl, eml and cbs]: acc-97.43, time-722.13
