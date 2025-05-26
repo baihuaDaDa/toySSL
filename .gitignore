@@ -2,5 +2,7 @@
 !*/
 !*.py
 !.gitignore
+!requirements.txt
+!README.md
 !eval_results/*/*.png
 !eval_results/*
